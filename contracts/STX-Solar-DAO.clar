@@ -136,3 +136,102 @@
 
 (define-private (calculate-voting-power (shares uint) (total-shares uint))
     (/ (* shares SHARE-SCALE) total-shares))
+
+
+;; Public Functions - Asset Management
+
+(define-public (register-asset 
+    (name (string-ascii 50))
+    (asset-type (string-ascii 20))
+    (total-shares uint)
+    (share-price uint)
+    (latitude int)
+    (longitude int))
+    (let ((asset-id (+ (var-get asset-counter) u1)))
+        (asserts! (is-valid-name name) ERR-INVALID-NAME)
+        (asserts! (is-valid-asset-type asset-type) ERR-INVALID-ASSET-TYPE)
+        (asserts! (> total-shares u0) ERR-INVALID-AMOUNT)
+        (asserts! (> share-price u0) ERR-INVALID-AMOUNT)
+        (asserts! (>= (* share-price total-shares) MIN-INVESTMENT) ERR-INVALID-AMOUNT)
+
+        (begin
+            (map-set assets
+                { asset-id: asset-id }
+                {
+                    name: name,
+                    asset-type: asset-type,
+                    total-shares: total-shares,
+                    available-shares: total-shares,
+                    share-price: share-price,
+                    total-revenue: u0,
+                    revenue-per-share: u0,
+                    status: "proposed",
+                    creation-height: stacks-block-height,
+                    last-updated: stacks-block-height,
+                    location: {
+                        latitude: latitude,
+                        longitude: longitude
+                    }
+                })
+            (map-set asset-metrics
+                { asset-id: asset-id }
+                {
+                    energy-produced: u0,
+                    operational-hours: u0,
+                    maintenance-cost: u0,
+                    efficiency-rating: u100,
+                    carbon-offset: u0,
+                    peak-output: u0,
+                    lifetime-roi: u0
+                })
+            (map-set governance-settings
+                { asset-id: asset-id }
+                {
+                    min-quorum: u50,          ;; 50% quorum
+                    vote-period: u144,        ;; ~24 hours
+                    min-vote-threshold: u75,   ;; 75% threshold
+                    cooldown-period: u72      ;; ~12 hours
+                })
+            (var-set asset-counter asset-id)
+            (ok asset-id))))
+
+;; Enhanced Share Purchase
+(define-public (purchase-shares (asset-id uint) (share-count uint))
+    (let ((asset (unwrap! (map-get? assets { asset-id: asset-id })
+                          ERR-ASSET-NOT-FOUND))
+          (current-ownership (default-to 
+                                { 
+                                    shares: u0, 
+                                    revenue-claimed: u0,
+                                    last-claim-height: stacks-block-height,
+                                    voting-power: u0
+                                }
+                                (map-get? ownership 
+                                    { asset-id: asset-id, owner: tx-sender }))))
+        (asserts! (> share-count u0) ERR-ZERO-SHARES)
+        (asserts! (<= share-count (get available-shares asset)) 
+                 ERR-INSUFFICIENT-SHARES)
+        (asserts! (is-eq (get status asset) "active") ERR-INVALID-STATUS)
+
+        (let ((cost (* share-count (get share-price asset)))
+              (new-voting-power (calculate-voting-power 
+                                (+ share-count (get shares current-ownership))
+                                (get total-shares asset))))
+            (begin
+                (try! (stx-transfer? cost tx-sender (as-contract tx-sender)))
+                (map-set assets
+                    { asset-id: asset-id }
+                    (merge asset {
+                        available-shares: (- (get available-shares asset) 
+                                           share-count),
+                        last-updated: stacks-block-height
+                    }))
+                (map-set ownership
+                    { asset-id: asset-id, owner: tx-sender }
+                    {
+                        shares: (+ (get shares current-ownership) share-count),
+                        revenue-claimed: (get revenue-claimed current-ownership),
+                        last-claim-height: (get last-claim-height current-ownership),
+                        voting-power: new-voting-power
+                    })
+                (ok true)))))
